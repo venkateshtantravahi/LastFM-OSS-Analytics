@@ -8,7 +8,7 @@ set -euo pipefail
 : "${S3_BUCKET_CURATED:=lastfm-curated}"
 
 #Configure alias and create buckets idempotently
-mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" || true
 
 # wait until response back
 until mc ls local >/dev/null 2>&1; do
