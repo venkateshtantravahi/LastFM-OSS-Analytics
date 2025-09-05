@@ -1,0 +1,29 @@
+{
+  "name": "LastFM OSS Analytics",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "features": {
+  "ghcr.io/devcontainers/features/docker-from-docker:2": {}
+  },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "forwardPorts": [5432, 9000, 9001, 8200, 5050],
+  "postCreateCommand": "pip install -U pip && pip install -e .[dev] && pre-commit install",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.debugpy",
+        "ms-azuretools.vscode-docker",
+        "batisteo.vscode-dbt-power-user"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  }
+}
