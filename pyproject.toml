@@ -1,0 +1,24 @@
+[build-system]
+requires = ['setuptools', 'wheel']
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lastfm-oss-analytics"
+version = "0.1.0"
+dependencies = [
+"requests",
+"pydantic",
+"pandas",
+"sqlalchemy",
+"psycopg[binary]",
+"boto3",
+"python-dotenv",
+"rich",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pre-commit"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
