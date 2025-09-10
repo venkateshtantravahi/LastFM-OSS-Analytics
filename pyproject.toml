@@ -8,6 +8,8 @@ version = "0.1.0"
 dependencies = [
 "requests",
 "pydantic",
+    "pydantic-settings",
+    "apache-airflow",
 "pandas",
 "sqlalchemy",
 "psycopg[binary]",
@@ -22,3 +24,14 @@ dev = ["pytest", "pre-commit"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-q"
+
+[tool.black]
+line-length=79
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 79
+# optional niceties:
+combine_as_imports = true
+force_sort_within_sections = true

@@ -10,7 +10,7 @@ services:
     ports: ["5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ../docker/postgres/initdb.d:/docker-entrypoint-init.d
+      - ../docker/postgres/initdb.d:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
       interval: 5s
@@ -73,6 +73,60 @@ services:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
     ports: ["5050:80"]
     depends_on: [postgres]
+
+  airflow-webserver:
+    image: apache/airflow:latest
+    profiles: ["airflow"]
+    container_name: airflow-webserver
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://postgres:${PGPASSWORD}@postgres:5432/airflow_db"
+      _PIP_ADDITIONAL_REQUIREMENTS: |
+        boto3 pydantic pydantic-settings requests psycopg2-binary apache-airflow-providers-postgres
+      PYTHONPATH: /opt/airflow
+      # Pass through our data envs so tasks can reach MINIO/Vault
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_REGION: ${S3_REGION}
+      S3_BUCKET_RAW: ${S3_BUCKET_RAW}
+      S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      VAULT_ADDR: ${VAULT_ADDR}
+      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+    ports: ["8080:8080"]
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - ../src:/opt/airflow/src
+    command: webserver
+
+  airflow-scheduler:
+    image: apache/airflow:latest
+    profiles: ["airflow"]
+    container_name: airflow-scheduler
+    depends_on:
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://postgres:${PGPASSWORD}@postgres:5432/airflow_db"
+      _PIP_ADDITIONAL_REQUIREMENTS: |
+        boto3 pydantic pydantic-settings requests psycopg2-binary apache-airflow-providers-postgres
+      PYTHONPATH: /opt/airflow
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_REGION: ${S3_REGION}
+      S3_BUCKET_RAW: ${S3_BUCKET_RAW}
+      S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      VAULT_ADDR: ${VAULT_ADDR}
+      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+    volumes:
+      - ../dags:/opt/airflow/dags
+      - ../src:/opt/airflow/src
+    command: scheduler
 
 volumes:
   pgdata: {}

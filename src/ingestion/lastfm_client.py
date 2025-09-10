@@ -1,30 +1,54 @@
+"""Minimal, robust Last.fm API client with retry/backoff.
+Docs: https://www.last.fm/api
+"""
+
 from __future__ import annotations
 
-import os
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Mapping
 
 import requests
 
-API = "https://ws.audioscrobbler.com/2.0/"
+API_BASE = "https://ws.audioscrobbler.com/2.0/"
 
 
-class LastFM:
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.getenv("LASTFM_API_KEY")
-        assert self.api_key, "Set LASTFM_API_KEY or fetch from Vault"
+class LastFMClient:
+    """
+    HTTP client to call Last.fm API methods.
 
-    def _get(self, params: Dict[str, Any]):
-        p = {"api_key": self.api_key, "format": "json", **params}
-        r = requests.get(API, params=p, timeout=30)
-        r.raise_for_status()
-        return r.json()
+    Parameters
+    ---------
+    api_key: str
+        Last.fm API key.
+    max_retries: int
+        How many times to retry on transient HTTP failures.
+    backoff_sec: float
+        Base backoff seconds (exponential with jitter).
+    """
 
-    def recent_tracks(self, user: str, limit: int = 200, page: int = 1):
-        return self._get(
-            {
-                "method": "user.getRecentTracks",
-                "user": user,
-                "limit": limit,
-                "page": page,
-            }
-        )
+    def __init__(
+        self, api_key: str, max_retries: int = 3, backoff_sec: float = 1.0
+    ):
+        self.api_key = api_key
+        self.max_retries = max_retries
+        self.backoff_sec = backoff_sec
+
+    def get(self, method: str, **params: Mapping[str, Any]) -> Dict[str, Any]:
+        p = {
+            "method": method,
+            "api_key": self.api_key,
+            "format": "json",
+            **params,
+        }
+        attempt = 0
+        while True:
+            try:
+                resp = requests.get(API_BASE, params=p, timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+            except requests.RequestException:
+                attempt += 1
+                if attempt > self.max_retries:
+                    raise
+                sleep = self.backoff_sec * (2 ** (attempt - 1))
+                time.sleep(sleep)
