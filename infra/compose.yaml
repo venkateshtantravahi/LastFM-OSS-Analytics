@@ -1,18 +1,49 @@
 name: lastfm_stack
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:latest
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+     # Reuse the same Postgres credentials used by the postgres service
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    PYTHONPATH: /opt/airflow
+    # Pin runtime deps installed inside the Airflow containers at start
+    _PIP_ADDITIONAL_REQUIREMENTS: >
+      boto3 pydantic pydantic-settings requests
+      psycopg2-binary apache-airflow-providers-postgres
+    # Pass-through for tasks (MinIO/Vault)
+    S3_ENDPOINT: ${S3_ENDPOINT}
+    S3_REGION: ${S3_REGION}
+    S3_BUCKET_RAW: ${S3_BUCKET_RAW}
+    S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    VAULT_ADDR: ${VAULT_ADDR}
+    VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
+    depends_on: postgres
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../src:/opt/airflow/src
+    - airflow_logs:/opt/airflow/logs
+
 services:
   postgres:
     image: postgres:latest
     container_name: pg
     environment:
-      POSTGRES_USER: ${PGUSER}
-      POSTGRES_PASSWORD: ${PGPASSWORD}
-      POSTGRES_DB: ${PGDATABASE}
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: [ "5432:5432" ]
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - lastfm_pgdata:/var/lib/postgresql/data
       - ../docker/postgres/initdb.d:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      test: [ "CMD-SHELL", "pg_isready -U $$POSTGRES_USER" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -24,11 +55,11 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    ports: ["9000:9000", "9001:9001"]
+    ports: [ "9000:9000", "9001:9001" ]
     volumes:
-      - minio:/data
+      - lastfm_minio:/data
     healthcheck:
-      test: ["CMD", "bash", "-c", "curl -fsS http://localhost:9000/minio/health/ready || exit 1"]
+      test: [ "CMD", "bash", "-c", "curl -fsS http://localhost:9000/minio/health/ready || exit 1" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -39,95 +70,73 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    volumes:
-      - ../docker/minio/create-buckets.sh:/usr/local/bin/create-buckets.sh:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      /usr/local/bin/create-buckets.sh && tail -f /dev/null
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       S3_BUCKET_RAW: ${S3_BUCKET_RAW}
       S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
+    volumes:
+      - ../docker/minio/create-buckets.sh:/usr/local/bin/create-buckets.sh:ro
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: |
+      /usr/local/bin/create-buckets.sh && tail -f /dev/null
 
   vault:
-    image: hashicorp/vault:latest
+    image: hashicorp/vault:1.16
     container_name: vault
-    cap_add: ["IPC_LOCK"]
-    volumes:
-#      - ../docker/vault/config.hcl:/vault/config/config.hcl:ro
-      - ../docker/vault/policies:/vault/policies:ro
+    cap_add: [ "IPC_LOCK" ]
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID}
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
       VAULT_API_ADDR: http://vault:8200
-    ports: ["8200:8200"]
-    command: ["server", "-dev"]
-
+    ports: [ "8200:8200" ]
+    command: [ "server", "-dev" ]
+    volumes:
+      - ../docker/vault/policies:/vault/policies:ro
 
   pgadmin:
-    image: dpage/pgadmin4:latest
+    image: dpage/pgadmin4:8.12
     container_name: pg_admin
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-    ports: ["5050:80"]
-    depends_on: [postgres]
+    ports: [ "5050:80" ]
+    depends_on: [ postgres ]
 
-  airflow-webserver:
-    image: apache/airflow:latest
-    profiles: ["airflow"]
-    container_name: airflow-webserver
-    depends_on:
-      - postgres
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://postgres:${PGPASSWORD}@postgres:5432/airflow_db"
-      _PIP_ADDITIONAL_REQUIREMENTS: |
-        boto3 pydantic pydantic-settings requests psycopg2-binary apache-airflow-providers-postgres
-      PYTHONPATH: /opt/airflow
-      # Pass through our data envs so tasks can reach MINIO/Vault
-      S3_ENDPOINT: ${S3_ENDPOINT}
-      S3_REGION: ${S3_REGION}
-      S3_BUCKET_RAW: ${S3_BUCKET_RAW}
-      S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      VAULT_ADDR: ${VAULT_ADDR}
-      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
-    ports: ["8080:8080"]
-    volumes:
-      - ../dags:/opt/airflow/dags
-      - ../src:/opt/airflow/src
-    command: webserver
+  airflow-api-server:
+    <<: *airflow-common
+    container_name: airflow-api-server
+    command: api-server
+    profiles: [ "airflow" ]
+    ports: [ "8080:8080" ]
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
 
   airflow-scheduler:
-    image: apache/airflow:latest
-    profiles: ["airflow"]
+    <<: *airflow-common
     container_name: airflow-scheduler
-    depends_on:
-      - postgres
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://postgres:${PGPASSWORD}@postgres:5432/airflow_db"
-      _PIP_ADDITIONAL_REQUIREMENTS: |
-        boto3 pydantic pydantic-settings requests psycopg2-binary apache-airflow-providers-postgres
-      PYTHONPATH: /opt/airflow
-      S3_ENDPOINT: ${S3_ENDPOINT}
-      S3_REGION: ${S3_REGION}
-      S3_BUCKET_RAW: ${S3_BUCKET_RAW}
-      S3_BUCKET_CURATED: ${S3_BUCKET_CURATED}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      VAULT_ADDR: ${VAULT_ADDR}
-      VAULT_TOKEN: ${VAULT_DEV_ROOT_TOKEN_ID}
-    volumes:
-      - ../dags:/opt/airflow/dags
-      - ../src:/opt/airflow/src
     command: scheduler
+    profiles: [ "airflow" ]
+
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command: -c "airflow db migrate && airflow users create \
+      --username ${AIRFLOW_ADMIN_USER:-admin} \
+      --password ${AIRFLOW_ADMIN_PASSWORD:-admin} \
+      --firstname Admin \
+      --lastname User \
+      --role Admin \
+      --email ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}"
+    profiles: [ "airflow" ]
+
 
 volumes:
-  pgdata: {}
-  minio: {}
+  lastfm_pgdata: {}
+  lastfm_minio: {}
+  airflow_logs: {}

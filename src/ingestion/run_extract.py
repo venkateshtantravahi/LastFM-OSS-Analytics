@@ -14,18 +14,22 @@ import logging
 from types import SimpleNamespace
 from typing import Type
 
-from .config import AppSettings
-from .extractors.base import BaseExtractor, ExtractContext
-from .extractors.chart import ChartTopArtists, ChartTopTags, ChartTopTracks
-from .extractors.geo import GeoTopArtists, GeoTopTracks
-from .extractors.user import UserRecentTracks
-from .lastfm_client import LastFMClient
-from .secrets import (
-    EnvSecretProvider,
-    VaultKV2Provider,
+from src.ingestion.config import AppSettings
+from src.ingestion.extractors.base import BaseExtractor, ExtractContext
+from src.ingestion.extractors.chart import (
+    ChartTopArtists,
+    ChartTopTags,
+    ChartTopTracks,
+)
+from src.ingestion.extractors.geo import GeoTopArtists, GeoTopTracks
+from src.ingestion.extractors.user import UserRecentTracks
+from src.ingestion.lastfm_client import LastFMClient
+from src.ingestion.secrets import (
+    EnvSecretProvider as _EnvSecretProvider,
+    VaultKV2Provider as _VaultKv2Provider,
     resolve_lastfm_api_key,
 )
-from .storage import S3Storage
+from src.ingestion.storage import S3Storage
 
 EXTRACTOR_REGISTRY = {
     "chart_top_artists": ChartTopArtists,
@@ -36,9 +40,12 @@ EXTRACTOR_REGISTRY = {
     "user_recent_tracks": UserRecentTracks,
 }
 
+EnvSecretsProvider = _EnvSecretProvider
+VaultKV2Provider = _VaultKv2Provider
+
 
 def _resolve_api_key(settings: AppSettings) -> str:
-    env_provider = EnvSecretProvider(prefix="")
+    env_provider = EnvSecretsProvider(prefix="")
     key = env_provider.get("lastfm", "LASTFM_API_KEY")
     if not key:
         vault = VaultKV2Provider(
