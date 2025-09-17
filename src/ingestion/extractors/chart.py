@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, ClassVar, Dict
 
-from .base import BaseExtractor, ExtractContext
+from src.ingestion.extractors.base import BaseExtractor, ExtractContext
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(init=False)
@@ -16,6 +19,9 @@ class ChartTopArtists(BaseExtractor):
     def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
+        LOG.debug(
+            "%s init: %s", self.__class__.__name__, {"limit": self.limit}
+        )
 
     def method_name(self) -> str:
         return self.endpoint_name
@@ -32,6 +38,9 @@ class ChartTopTracks(BaseExtractor):
     def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
+        LOG.debug(
+            "%s init: %s", self.__class__.__name__, {"limit": self.limit}
+        )
 
     def method_name(self) -> str:
         return self.endpoint_name
@@ -48,6 +57,9 @@ class ChartTopTags(BaseExtractor):
     def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
+        LOG.debug(
+            "%s init: %s", self.__class__.__name__, {"limit": self.limit}
+        )
 
     def method_name(self) -> str:
         return self.endpoint_name

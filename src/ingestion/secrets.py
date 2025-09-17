@@ -7,11 +7,19 @@ server/AppRole or plain env vars is easier.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import logging
 import os
 from typing import Any, Optional
 
+from dotenv import load_dotenv
 import requests
+
+from src.ingestion.exception import ConfigError
+
+LOG = logging.getLogger(__name__)
+
+load_dotenv(dotenv_path="../../infra/.env")
 
 
 class SecretsProvider(ABC):
@@ -46,7 +54,7 @@ class VaultKV2Provider(SecretsProvider):
     timeout: float = 5.0
 
     def _url(self, path: str) -> str:
-        return f"{self.addr}/v1/data/{self.kv_mount}/{path}"
+        return f"{self.addr}/v1/{self.kv_mount}/{path}"
 
     def get(self, path: str, key: str) -> Optional[str]:
         try:
@@ -57,18 +65,32 @@ class VaultKV2Provider(SecretsProvider):
             )
             resp.raise_for_status()
             data: Any = resp.json()
-            return data.get("data", {}).get("data", {}).get(key)
+            return data.get("data", {}).get(key)
         except requests.exceptions.RequestException:
             return None
 
 
+class CachedSecretProvider(SecretsProvider):
+    inner: SecretsProvider
+    _cache: dict[str, Optional[str]] = field(default_factory=dict)
+
+    def get(self, path: str, key: str) -> Optional[str]:
+        ck = f"{path}:{key}"
+        if ck not in self._cache:
+            self._cache[ck] = self.inner.get(path, key)
+        return self._cache[ck]
+
+
 def resolve_lastfm_api_key(provider: SecretsProvider) -> Optional[str]:
-    """Get the Last.fm API key from provider or raise a clear error."""
-    key = provider.get("lastfm", "api_key")
-    if not key:
-        raise RuntimeError(
-            """Last.fm API Key not found.
-            Set env LASTFM_API_KEY environment variable or write
-            kv/lastfm:api_key in vault"""
-        )
-    return key
+    """Get the Last.fm API key from the provider or raise a clear error."""
+    try:
+        api_key = provider.get("lastfm", "api-key")
+    except Exception as e:
+        LOG.error("Secrets error resolving Last.fm API key: %s", e)
+        raise ConfigError(
+            "Missing Last.fm API key (secrets provider failed)"
+        ) from e
+    if not api_key or not api_key.strip():
+        raise ConfigError("Missing Last.fm API key (empty)")
+    LOG.debug("Resolved Last.fm API key (masked)")
+    return api_key

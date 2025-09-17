@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from types import SimpleNamespace
 from typing import Type
+import uuid
+
+from dotenv import load_dotenv
 
 from src.ingestion.config import AppSettings
+from src.ingestion.exception import RateLimitError, UpstreamError
 from src.ingestion.extractors.base import BaseExtractor, ExtractContext
 from src.ingestion.extractors.chart import (
     ChartTopArtists,
@@ -27,9 +32,15 @@ from src.ingestion.lastfm_client import LastFMClient
 from src.ingestion.secrets import (
     EnvSecretProvider as _EnvSecretProvider,
     VaultKV2Provider as _VaultKv2Provider,
-    resolve_lastfm_api_key,
 )
 from src.ingestion.storage import S3Storage
+
+LOG = logging.getLogger(__name__)
+
+load_dotenv(
+    dotenv_path="/Users/venkateshtantravahi/"
+    + "PycharmProjects/LastFM-OSS-Analytics/infra/.env"
+)
 
 EXTRACTOR_REGISTRY = {
     "chart_top_artists": ChartTopArtists,
@@ -44,17 +55,31 @@ EnvSecretsProvider = _EnvSecretProvider
 VaultKV2Provider = _VaultKv2Provider
 
 
+def summarize_settings(s: AppSettings) -> dict:
+    return {
+        "log_level": getattr(s, "log_level", "INFO"),
+        "s3_endpoint": getattr(s.s3, "endpoint_url", None),
+        "s3_region": getattr(s.s3, "region_name", None),
+        "s3_bucket_raw": getattr(s.s3, "bucket_raw", None),
+        "vault_addr": getattr(
+            s,
+            "vault_addr",
+            getattr(getattr(s, "vault", object()), "addr", None),
+        ),
+    }
+
+
 def _resolve_api_key(settings: AppSettings) -> str:
-    env_provider = EnvSecretsProvider(prefix="")
-    key = env_provider.get("lastfm", "LASTFM_API_KEY")
-    if not key:
-        vault = VaultKV2Provider(
-            addr=settings.vault_addr,
-            token=settings.vault.token,
-            kv_mount=settings.vault.kv_mount,
-        )
-        key = resolve_lastfm_api_key(vault)
-    return key
+    # using flat attr
+    addr = os.getenv("VAULT_ADDR")
+    token = os.getenv("VAULT_DEV_ROOT_TOKEN_ID")
+    kv_mount = os.getenv("VAULT_KV_MOUNT")
+    path = os.getenv("VAULT_SECRET_PATH")
+    key = os.getenv("VAULT_SECRET_KEY")
+
+    vault = VaultKV2Provider(addr=addr, token=token, kv_mount=kv_mount)
+    val = vault.get(path, key)
+    return val
 
 
 def build_extractor(
@@ -66,11 +91,11 @@ def build_extractor(
     Parameters
     ----------
     settings: AppSettings
-    Loaded configuration.
+        Loaded configuration.
     job: str
-    Registry key, e.g. "chart_top_artists".
+        Registry key, e.g. "chart_top_artists".
     args: SimpleNamespace
-    Holds optional parameters like limit/country/user/page.
+        Holds optional parameters like limit/country/user/page.
     """
     cls: Type[BaseExtractor] = EXTRACTOR_REGISTRY[job]
 
@@ -100,6 +125,8 @@ def run_job(
     This is the preferred entrypoint for Airflow TaskFlow tasks.
     """
     settings = AppSettings()
+    limit = max(1, min(200, int(limit))) if isinstance(limit, int) else 200
+    page = max(1, int(page)) if isinstance(page, int) else 1
     args = SimpleNamespace(limit=limit, country=country, user=user, page=page)
     extractor = build_extractor(settings, job, args)
     return extractor.run()
@@ -119,15 +146,62 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO)
-    )
-    logging.info("Starting job: %s", args.job)
+    if hasattr(settings, "configure_logging"):
+        settings.configure_logging()
+    else:
+        logging.basicConfig(
+            level=getattr(
+                logging,
+                str(getattr(settings, "log_level", "INFO")).upper(),
+                logging.INFO,
+            ),
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
 
-    # ns = SimpleNamespace(**vars(args))
-    extractor = build_extractor(settings, args.job, args)
-    key = extractor.run()
-    logging.info("Wrote object to bucket://%s/%s", settings.s3.bucket_raw, key)
+    correlation_id = os.environ.get("CORRELATION_ID", uuid.uuid4().hex)
+    os.environ["CORRELATION_ID"] = correlation_id
+    LOG.info(
+        "Job start correlation_id=%s settings=%s",
+        correlation_id,
+        summarize_settings(settings),
+    )
+
+    # CLI Validation
+    if args.job.startswith("user_") and not args.user:
+        LOG.error("Missing --user for job=%s", args.job)
+        raise SystemExit(2)
+    if args.limit is not None and (args.limit < 1 or args.limit > 200):
+        LOG.warning("Clamping --limit=%s to [1,200]", args.limit)
+        args.limit = max(1, min(200, args.limit))
+    if args.page is not None and args.page < 1:
+        LOG.warning("Clamping --page=%s to >=1", args.page)
+        args.page = max(1, args.page)
+
+    try:
+        exctractor = build_extractor(settings, args.job, args)
+        key = exctractor.run()
+        LOG.info("Job success correlation_id=%s key=%s", correlation_id, key)
+        LOG.info(
+            "Wrote object to s3://%s/%s",
+            getattr(settings.s3, "bucket_raw", "<unknown>"),
+            key,
+        )
+    except (RateLimitError, UpstreamError) as e:
+        LOG.warning(
+            "Job recoverable failure correlation_id=%s: %s",
+            correlation_id,
+            e,
+            exc_info=True,
+        )
+        raise
+    except Exception as e:
+        LOG.error(
+            "Job failed correlation_id=%s: %s",
+            correlation_id,
+            e,
+            exc_info=True,
+        )
+        raise
 
 
 if __name__ == "__main__":

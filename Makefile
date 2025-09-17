@@ -1,134 +1,160 @@
-#-----------Config-------------
-COMPOSE := docker compose -f compose.yaml --env-file .env
-PROFILE_ENV := COMPOSE_PROFILES=airflow
+# -----------------------------
+# LastFM OSS Analytics — Makefile
+# -----------------------------
 
-SERVICES_CORE := postgres minio minio-mc vault pgadmin
-SERVICES_AIRFLOW := airflow-api-server airflow-scheduler
-AIRFLOW_INIT := airflow-init
+# Default goal prints help like real CLI tools
+.DEFAULT_GOAL := help
 
-#---------- Phony----------
-.PHONY: help check \
-		up core ps logs logs-% restart-% exec-% \
-		airflow-init airflow-up airflow-all airflow-down \
-		buckets down clean nuke fmt lint test \
-		verify verify-pg verify-minio verify-vault seed-pg \
-		seed-buckets seed-vault get-airflow-password
+# Paths / Compose wrapper
+INFRA_DIR        := infra
+DC               := cd $(INFRA_DIR) && docker compose -f compose.yaml --env-file .env
 
-#------------Help---------------
-help:
-	@echo "make up            # bring up core infra (postgres, minio, vault, pgadmin)"
-	@echo "make airflow-init  # migrate Airflow DB + create admin user (one-shot)"
-	@echo "make airflow-up    # start Airflow webserver + scheduler"
-	@echo "make airflow-all   # core + init + airflow"
-	@echo "make down          # stop all containers (no volume wipe)"
-	@echo "make clean         # stop + remove volumes (dev data loss)"
-	@echo "make nuke          # clean + remove named docker volumes"
-	@echo "make ps            # list services"
-	@echo "make logs          # tail all logs"
-	@echo "make logs-<svc>    # tail logs for a service (e.g., logs-airflow-webserver)"
-	@echo "make restart-<svc> # force-recreate one service"
-	@echo "make exec-<svc>    # shell into a service"
-	@echo "make buckets       # re-run MinIO bucket bootstrap"
-	@echo "make fmt|lint|test # dev utilities (pre-commit / pytest)"
-	@echo "make verify 		  #sanity check on core containers"
-	@echo "make verify-pg     #check to verify if postgres running and schemas got created"
-	@echo "make verify-minio  #sanity check on minio container"
-	@echo "make verify-vault  #sanity check on vault services"
-	@echo "make seed-pg 	  #re-running init script to initialize objects"
-	@echo "make seed-buckets  #re initializing buckets"
-	@echo "make seed-vault    #re initializing vault with secrets and reading policies"
-	@echo "get-airflow-password #get the generated passcode."
-#----------- Compose Sanity ---------------------------
-check:
-	cd infra && $(COMPOSE) config >/dev/null && echo "compose ok".
+# Profiles
+PROFILE_ENV      := COMPOSE_PROFILES=airflow
 
+# Service groups
+CORE_SERVICES    := postgres minio minio-mc vault pgadmin
+AIRFLOW_SERVICES := airflow-api-server airflow-scheduler airflow-dag-processor
+AIRFLOW_INIT     := airflow-init
 
-# ------------ Core Infra ---------------------
-up: core
-core:
-	cd infra && $(COMPOSE) up -d $(SERVICES_CORE)
+# ------------- Helper: pretty help -------------
+# Any target with a trailing '## comment' shows up in `make help`
+help: ## Show this help message.
+	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-ps:
-	cd infra && $(COMPOSE) ps
+# ------------- Compose sanity ------------------
+check: ## Validate docker compose config.
+	@$(DC) config >/dev/null && echo "compose: OK"
 
-logs:
-	cd infra && $(COMPOSE) logs -f --tail=200
+ps: ## List running services (all).
+	@$(DC) ps
 
-logs-%:
-	cd infra && $(COMPOSE) logs -f --tail=200 $*
+logs: ## Tail all logs.
+	@$(DC) logs -f --tail=200
 
-restart-%:
-	cd infra && $(COMPOSE) up -d --force-recreate $*
+logs-%: ## Tail logs for a specific service, e.g. make logs-airflow-api-server
+	@$(DC) logs -f --tail=200 $*
 
-exec-%:
-	cd infra && $(COMPOSE) exec $* sh -lc 'bash || sh'
+restart-%: ## Recreate a single service in place, e.g. make restart-minio
+	@$(DC) up -d --force-recreate $*
 
+exec-%: ## Open a shell in a service, e.g. make exec-postgres
+	@$(DC) exec $* sh -lc 'bash || sh'
 
-# --------------- Airflow ------------------------
-airflow-init: core
-	cd infra && $(PROFILE_ENV) $(COMPOSE) up $(AIRFLOW_INIT)
+# ------------- Core infra ----------------------
+up: core ## Bring up core infra (postgres, minio, vault, pgadmin).
+core: ## Start core services only.
+	@$(DC) up -d $(CORE_SERVICES)
 
-airflow-up:
-	cd infra && $(PROFILE_ENV) $(COMPOSE) up -d $(SERVICES_AIRFLOW)
+down: ## Stop all containers (project-wide, no volume wipe).
+	@$(DC) down
 
-airflow-all: core airflow-init airflow-up
+clean: ## Stop and remove containers + volumes (DEV DATA LOSS).
+	@$(DC) down -v
 
-airflow-down:
-	cd infra && $(PROFILE_ENV) $(COMPOSE) down
+nuke: clean ## Remove named volumes too (DEV ONLY).
+	-@docker volume rm lastfm_pgdata lastfm_minio lastfm_stack_airflow_logs 2>/dev/null || true
 
-get-airflow-password:
-	cd infra && docker compose --env-file .env exec airflow-api-server \
-	bash -lc 'FILE="$${AIRFLOW_HOME:-/opt/airflow}/simple_auth_manager_passwords.json.generated"; \
-		if [ -f "$$FILE" ]; then \
-		  if command -v jq >/dev/null 2>&1; then jq . "$$FILE"; else cat "$$FILE"; fi; \
-		else \
-		  echo "Password file not found. Start the Airflow web/API service once to generate it."; \
-		  exit 1; \
-		fi'
+# ------------- Airflow lifecycle ----------------
+airflow-init: core ## Migrate Airflow DB & create admin user (one-shot).
+	@cd $(INFRA_DIR) && $(PROFILE_ENV) docker compose -f compose.yaml --env-file .env up $(AIRFLOW_INIT)
 
-# ---------- MINIO buckets (idempotent) -----------
+airflow-up: ## Start Airflow API server + scheduler + DAG processor.
+	@cd $(INFRA_DIR) && $(PROFILE_ENV) docker compose -f compose.yaml --env-file .env up -d $(AIRFLOW_SERVICES)
 
-buckets:
-	cd infra && $(COMPOSE) exec minio-mc sh -lc '/usr/local/bin/create-buckets.sh || true'
+airflow-stop: ## Stop only Airflow containers (keep core running).
+	@$(DC) stop $(AIRFLOW_SERVICES)
 
-# --------- Verifying ----------------------
-verify: verify-pg verify-minio verify-vault
+airflow-restart: ## Restart Airflow services.
+	@$(MAKE) airflow-stop >/dev/null || true
+	@$(MAKE) airflow-up
 
-verify-pg:
-	cd infra && $(COMPOSE) exec -T postgres sh -lc 'psql -U "$$POSTGRES_USER" -tAc "SELECT datname FROM pg_database WHERE datname='\''lastfm'\''" && psql -U "$$POSTGRES_USER" -d lastfm -tAc "SELECT to_regclass('\''raw.events'\'')"'
+airflow-dags: ## List DAGs from inside API server.
+	@$(DC) exec airflow-api-server airflow dags list
 
-seed-pg:
-	cd infra && $(COMPOSE) exec -T postgres sh -lc 'psql -U "$$POSTGRES_USER" -f /docker-entrypoint-initdb.d/00_init.sql'
+airflow-errors: ## Show DAG import errors.
+	@$(DC) exec airflow-api-server airflow dags list-import-errors
 
-verify-minio:
-	cd infra && $(COMPOSE) exec -T minio-mc sh -lc 'mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1 || true; mc ls "local/$$S3_BUCKET_RAW" && mc ls "local/$$S3_BUCKET_CURATED"'
+airflow-dagdir: ## Show DAGs folder inside container.
+	@$(DC) exec airflow-api-server bash -lc 'echo "DAGS_FOLDER=${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}"; ls -la ${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}'
 
-seed-buckets:
-	cd infra && $(COMPOSE) exec -T minio-mc sh -lc '/usr/local/bin/create-buckets.sh'
+airflow-unpause: ## Unpause the ingest_chart_daily DAG.
+	@$(DC) exec airflow-api-server airflow dags unpause ingest_chart_daily
 
-verify-vault:
-	curl -sf "$$VAULT_ADDR/v1/kv/data/lastfm" -H "X-Vault-Token: $$VAULT_DEV_ROOT_TOKEN_ID" | jq '.data.data' || echo "kv/lastfm missing"
+airflow-trigger: ## Trigger the ingest_chart_daily DAG once.
+	@$(DC) exec airflow-api-server airflow dags trigger ingest_chart_daily
 
-seed-vault:
-	cd infra && $(COMPOSE) exec -T vault sh -lc 'export VAULT_ADDR=http://127.0.0.1:8200; vault login "$$VAULT_DEV_ROOT_TOKEN_ID"; vault secrets enable -path=kv kv || true; vault kv put kv/lastfm api_key="${LASTFM_API_KEY:-cf2de1533eae94e8d9ed49e220afbc14}"'
+airflow-logs-dp: ## Tail DAG processor logs.
+	@$(DC) logs -f --tail=200 airflow-dag-processor
 
-# ---------- Teardown ----------
-down:
-	cd infra && $(COMPOSE) down
+get-airflow-password: ## Print generated Airflow login (simple_auth manager).
+	@cd $(INFRA_DIR) && docker compose --env-file .env exec airflow-api-server \
+	bash -lc 'F="$${AIRFLOW_HOME:-/opt/airflow}/simple_auth_manager_passwords.json.generated"; \
+	if [ -f "$$F" ]; then command -v jq >/dev/null 2>&1 && jq . "$$F" || cat "$$F"; \
+	else echo "Password file not found. Start the Airflow API/Web once to generate it."; exit 1; fi'
 
-clean:
-	cd infra && $(COMPOSE) down -v
+airflow-smoke: ## Smoke-check S3 & Vault from inside Airflow (boto3 + curl).
+	@$(DC) exec -T airflow-scheduler /bin/sh -lc '\
+	  set -e; \
+	  echo "S3_ENDPOINT=$$S3_ENDPOINT"; \
+	  echo "VAULT_ADDR=$$VAULT_ADDR VAULT_TOKEN=$${VAULT_TOKEN:+set}"; \
+	  curl -fsS "$$S3_ENDPOINT/minio/health/ready" >/dev/null && echo "minio: ok"; \
+	  curl -fsS -H "X-Vault-Token: $$VAULT_TOKEN" "$$VAULT_ADDR/v1/sys/health" >/dev/null && echo "vault: ok"; \
+	  python -c "import os, boto3; \
+endpoint=os.environ.get(\"S3_ENDPOINT\"); \
+ak=os.environ.get(\"MINIO_ROOT_USER\"); sk=os.environ.get(\"MINIO_ROOT_PASSWORD\"); \
+s3=boto3.client(\"s3\", endpoint_url=endpoint, aws_access_key_id=ak, aws_secret_access_key=sk, region_name=\"us-east-1\"); \
+print(\"buckets:\", [b[\"Name\"] for b in s3.list_buckets().get(\"Buckets\", [])])" \
+	'
 
-# Remove named volumes too (dev only)
-nuke: clean
-	-docker volume rm lastfm_pgdata lastfm_minio airflow_logs
+# ------------- MinIO buckets (idempotent) -------
+buckets: ## Re-run MinIO bucket bootstrap script.
+	@$(DC) up -d minio minio-mc
+	@$(DC) exec minio-mc sh -lc '/usr/local/bin/create-buckets.sh || true'
 
-# ---------- Dev ----------
-fmt:
-	pre-commit run -a
+verify-minio: ## Ensure buckets exist (lists raw & curated).
+	@$(DC) run --rm minio_mc sh -lc '\
+	  mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null; \
+	  echo "raw:";     mc ls "local/$$S3_BUCKET_RAW" || true; \
+	  echo "curated:"; mc ls "local/$$S3_BUCKET_CURATED" || true; \
+	'
+seed-buckets: ## Force bucket creation script again.
+	@$(DC) exec -T minio-mc sh -lc '/usr/local/bin/create-buckets.sh'
 
-lint: fmt
+# ------------- Postgres -------------------------
+verify-pg: ## Check DB created and raw.events table exists.
+	@$(DC) exec -T postgres sh -lc 'psql -U "$$POSTGRES_USER" -tAc "SELECT datname FROM pg_database WHERE datname='\''lastfm'\''" && psql -U "$$POSTGRES_USER" -d lastfm -tAc "SELECT to_regclass('\''raw.events'\'')"'
 
-test:
-	pip install -e .[dev] || pip install -e .
-	pytest -q --maxfail=1 --disable-warnings
+seed-pg: ## Re-run init SQL (schema/table bootstrap).
+	@$(DC) exec -T postgres sh -lc 'psql -U "$$POSTGRES_USER" -f /docker-entrypoint-initdb.d/00_init.sql'
+
+# ------------- Vault ----------------------------
+verify-vault: ## Read kv/lastfm from inside Airflow (container DNS).
+	@$(DC) exec -T airflow-api-server sh -lc '\
+	  set -e; \
+	  echo "VAULT_ADDR=$$VAULT_ADDR VAULT_TOKEN=$${VAULT_TOKEN:+set} VAULT_KV_MOUNT=$${VAULT_KV_MOUNT:-kv}"; \
+	  mount=$${VAULT_KV_MOUNT:-kv}; \
+	  if [ "$$mount" = "secret" ]; then path="/v1/$$mount/data/lastfm"; else path="/v1/$$mount/lastfm"; fi; \
+	  curl -sf "$$VAULT_ADDR$$path" -H "X-Vault-Token: $$VAULT_TOKEN" \
+	  | python -c "import sys,json; d=json.load(sys.stdin); x=d.get(\"data\",{}); x=x.get(\"data\",x); print(json.dumps(x,indent=2))" \
+	  || echo "missing: $$mount/lastfm" \
+	'
+seed-vault: ## Enable KV and write a demo LASTFM_API_KEY in dev Vault.
+	@$(DC) exec -T vault sh -lc 'export VAULT_ADDR=http://127.0.0.1:8200; vault login "$$VAULT_DEV_ROOT_TOKEN_ID" >/dev/null; vault secrets enable -path=kv kv || true; vault kv put kv/lastfm api_key="$${LASTFM_API_KEY:-cf2de1533eae94e8d9ed49e220afbc14}"'
+
+# ------------- Dev utilities --------------------
+fmt: ## Run pre-commit on all files (format + lint).
+	@pre-commit run -a
+
+lint: fmt ## Alias for fmt (Black/isort/flake8 via pre-commit).
+
+test: ## Install package in editable mode and run pytest fast-fail.
+	@pip install -e .[dev] || pip install -e .
+	@pytest -q --maxfail=1 --disable-warnings
+
+# ------------- One-click flows ------------------
+verify: verify-pg verify-vault verify-minio  ## Sanity-check core + app connectivity.
+
+core-up: up verify ## Start core & verify it is healthy.
+
+airflow-all: core airflow-init airflow-up airflow-smoke ## Core + init + Airflow + smoke checks.

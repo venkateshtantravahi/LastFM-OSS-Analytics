@@ -38,15 +38,18 @@ cp infra/.env.template infra/.env
 # 2) Start services (Postgres, MinIO, Vault, pgAdmin)
 make up
 
-# 3) Add the Last.fm API key in Vault (dev)
-# Open http://localhost:8200 (token: dev-root)
-# Enable KV v2 at path "kv" → create secret kv/lastfm with key api_key=<YOUR_KEY>
+# 3) Start Airflow (scheduler, API server, DAG processor)
+make airflow-all
+
+# 4) Add the Last.fm API key in Vault (dev)
+Open http://localhost:8200 (token: dev-root)
+Enable KV v2 at path "kv" → create secret kv/lastfm with key api_key=<YOUR_KEY>
 ```
-
-MinIO Console: [http://localhost:9001](http://localhost:9001)
-Vault UI: [http://localhost:8200](http://localhost:8200)
-pgAdmin: [http://localhost:5050](http://localhost:5050)
-
+# Live Connections
+MinIO Console: [http://localhost:9001](http://localhost:9001) \
+Vault UI: [http://localhost:8200](http://localhost:8200) \
+pgAdmin: [http://localhost:5050](http://localhost:5050) \
+airflow-api-server UI: [http://localhost:8080](https://localhost:8080)
 ---
 
 ## Running a smoke test (manual)
@@ -86,6 +89,69 @@ print("wrote:", bucket, key)
 ```
 
 You should see the object under the bucket in MinIO Console.
+
+---
+
+## Airflow DAGs (ingestion)
+Included DAGs
+
+| DAG ID               | What it pulls                              | Schedule | Raw S3 prefix pattern                            |
+| -------------------- | ------------------------------------------ | -------- | ------------------------------------------------ |
+| `ingest_chart_daily` | `chart.getTopArtists/Tags/Tracks`          | `@daily` | `chart.getTop*/dt=YYYY-MM-DD/part-*.json`        |
+| `ingest_geo_daily`   | `geo.getTopArtists/Tracks`                 | `@daily` | `geo.getTop*/dt=YYYY-MM-DD/part-*.json`          |
+| `ingest_user_daily`  | `user.getRecentTracks` (default user `rj`) | `@daily` | `user.getRecentTracks/dt=YYYY-MM-DD/part-*.json` |
+
+Extractors resolve the API key in this order: ENV `LASTFM_API_KEY` → Vault `kv/lastfm` key `api_key`.
+
+### List dags
+```bash
+make airflow-dags
+```
+
+### Unpause and Trigger dags automaitically
+```bash
+make airflow-unpause
+make airflow-trigger
+```
+
+### Trigger one-off runs
+```bash
+docker compose -f infra/compose.yaml exec -T airflow-api-server \
+  airflow dags trigger ingest_chart_daily
+docker compose -f infra/compose.yaml exec -T airflow-api-server \
+  airflow dags trigger ingest_geo_daily
+docker compose -f infra/compose.yaml exec -T airflow-api-server \
+  airflow dags trigger ingest_user_daily
+```
+---
+
+## Verifying things
+
+### Verify Vault
+```bash
+docker compose -f infra/compose.yaml exec -T airflow-api-server sh -lc '
+python - <<PY
+import os, json, urllib.request
+addr=os.getenv("VAULT_ADDR","http://127.0.0.1:8200")
+tok=os.getenv("VAULT_TOKEN","dev-root")
+req=urllib.request.Request(f"{addr}/v1/kv/data/lastfm", headers={"X-Vault-Token": tok})
+print(json.dumps(json.load(urllib.request.urlopen(req))["data"]["data"], indent=2))
+PY'
+
+or you can do it siply by using make commands
+make verify-vault
+```
+Expected output
+`
+{
+  "api_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}
+`
+
+To verify other objects inside containers, you can directly use help
+from the make file using
+
+`make help`
 
 ---
 
@@ -146,11 +212,41 @@ lastfm-oss-analytics/
 ## Make commands
 
 ```makefile
-make up        # start containers
-make down      # stop and remove containers + volumes (dev only)
-make logs      # follow compose logs
-make fmt       # run pre-commit hooks (black/isort/flake8)
-make test      # run pytest
+make help
+  help                         Show this help message.
+  check                        Validate docker compose config.
+  ps                           List running services (all).
+  logs                         Tail all logs.
+  up                           Bring up core infra (postgres, minio, vault, pgadmin).
+  core                         Start core services only.
+  down                         Stop all containers (project-wide, no volume wipe).
+  clean                        Stop and remove containers + volumes (DEV DATA LOSS).
+  nuke                         Remove named volumes too (DEV ONLY).
+  airflow-init                 Migrate Airflow DB & create admin user (one-shot).
+  airflow-up                   Start Airflow API server + scheduler + DAG processor.
+  airflow-stop                 Stop only Airflow containers (keep core running).
+  airflow-restart              Restart Airflow services.
+  airflow-dags                 List DAGs from inside API server.
+  airflow-errors               Show DAG import errors.
+  airflow-dagdir               Show DAGs folder inside container.
+  airflow-unpause              Unpause the ingest_chart_daily DAG.
+  airflow-trigger              Trigger the ingest_chart_daily DAG once.
+  airflow-logs-dp              Tail DAG processor logs.
+  get-airflow-password         Print generated Airflow login (simple_auth manager).
+  airflow-smoke                Smoke-check S3 & Vault from inside Airflow (boto3 + curl).
+  buckets                      Re-run MinIO bucket bootstrap script.
+  verify-minio                 Ensure buckets exist (lists raw & curated).
+  seed-buckets                 Force bucket creation script again.
+  verify-pg                    Check DB created and raw.events table exists.
+  seed-pg                      Re-run init SQL (schema/table bootstrap).
+  verify-vault                 Read kv/lastfm from inside Airflow (container DNS).
+  seed-vault                   Enable KV and write a demo LASTFM_API_KEY in dev Vault.
+  fmt                          Run pre-commit on all files (format + lint).
+  lint                         Alias for fmt (Black/isort/flake8 via pre-commit).
+  test                         Install package in editable mode and run pytest fast-fail.
+  verify                       Sanity-check core + app connectivity.
+  core-up                      Start core & verify it is healthy.
+  airflow-all                  Core + init + Airflow + smoke checks.
 ```
 
 ---
@@ -193,11 +289,26 @@ GitHub Actions installs the package and runs formatting + tests.
 * Ensure the volume target is `/docker-entrypoint-initdb.d`.
 * If the DB already initialized without it, run the SQL manually or `make down` (dev only) then `make up`.
 
+**No objects under prefixes even after triggering DAGs**
+* Check Airflow task logs for `Missing LASTFM_API_KEY` or HTTP errors.
+* Ensure `kv/lastfm` has `api_key` set, or export `LASTFM_API_KEY` into the container env.
+* Confirm MinIO creds and `S3_ENDPOINT` are set in `infra/.env` and visible inside Airflow containers.
+
+**`jq: not found` in containers**
+* Use the Python verification snippets above (no `jq` required).
+
+**MinIO “mc” job not running**
+* That container may finish and exit after bootstrap; it’s expected. Use the Python S3 checks instead.
+
+**Vault “kv” path mismatch**
+* KV v2 read path is `/v1/<mount>/<path>`. With `VAULT_KV_MOUNT=kv`, the correct HTTP path is:
+* GET `$VAULT_ADDR/v1/kv/lastfm` (header X-Vault-Token: $VAULT_TOKEN).
+
 ---
 
 ## Roadmap (brief)
 
-* **Phase 2**: add extractor modules and Airflow DAGs (`ingest_chart_daily`, `ingest_geo_daily`, …) writing partitions to MinIO.
+* **Phase 2**: extractor modules and Airflow DAGs (`ingest_chart_daily`, `ingest_geo_daily`, …) writing partitions to MinIO.
 * **Phase 3**: dbt models (silver/gold) + data tests.
 * **Phase 4**: Superset dashboards.
 

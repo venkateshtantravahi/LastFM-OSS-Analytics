@@ -7,7 +7,10 @@ populate at runtime both locally and in Airflow containers.
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+import logging
+from typing import Optional
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,45 +21,43 @@ class S3Settings(BaseSettings):
     - AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (or MINIO_ROOT_USER/PASSWORD)
     """
 
-    model_config = SettingsConfigDict(extra="ignore")
+    endpoint_url: str = Field("http://localhost:9000", alias="S3_ENDPOINT")
+    region_name: str = Field("us-east-1", alias="S3_REGION")
+    access_key: str = Field("minio", alias="AWS_ACCESS_KEY_ID")
+    secret_key: str = Field("minio123", alias="AWS_SECRET_ACCESS_KEY")
+    bucket_raw: str = Field("lastfm-raw", alias="S3_BUCKET_RAW")
+    bucket_curated: str = Field("lastfm-curated", alias="S3_BUCKET_CURATED")
 
-    enpoint_url: str = Field(
-        "http://localhost:9000", validation_alias=AliasChoices("S3_ENDPOINT")
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=".env",
+        env_nested_delimiter="__",
+        extra="ignore",
     )
-    region_name: str = Field(
-        "us-east-1", validation_alias=AliasChoices("S3_REGION")
-    )
-    access_key: str = Field(
-        "admin",
-        validation_alias=AliasChoices("AWS_ACCESS_KEY_ID", "MINIO_ROOT_USER"),
-    )
-    secret_key: str = Field(
-        "adminadmin",
-        validation_alias=AliasChoices(
-            "AWS_SECRET_ACCESS_KEY", "MINIO_ROOT_PASSWORD"
-        ),
-    )
-    bucket_raw: str = Field(
-        "lastfm-raw", validation_alias=AliasChoices("S3_BUCKET_RAW")
-    )
-    bucket_curated: str = Field(
-        "lastfm-curated", validation_alias=AliasChoices("S3_BUCKET_CURATED")
-    )
+
+    @model_validator(mode="after")
+    def _require_non_empty(self):
+        for name in ("endpoint_url", "bucket_raw", "access_key", "secret_key"):
+            v = getattr(self, name, None)
+            if not isinstance(v, str) or not v.strip():
+                raise ValueError(f"{name} must be non-empty and set")
+        return self
+
+    def configure_logging(self) -> None:
+        logging.basicConfig(
+            level=getattr(logging, self.log_level.upper(), logging.INFO),
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        )
 
 
 class VaultSettings(BaseSettings):
     """HashiCorp Vault dev-mode access settings"""
 
-    model_config = SettingsConfigDict(extra="ignore")
-    addr: str = Field(
-        "http://127.0.0.1:8200", validation_alias=AliasChoices("VAULT_ADDR")
-    )
-    token: str = Field(
-        "dev-root", validation_alias=AliasChoices("VAULT_TOKEN")
-    )
-    kv_mount: str = Field(
-        "kv", validation_alias=AliasChoices("VAULT_KV_MOUNT")
-    )
+    addr: Optional[str] = Field("http://127.0.0.1:8200", alias="VAULT_ADDR")
+    token: Optional[str] = Field("dev-root", alias="VAULT_DEV_ROOT_TOKEN_ID")
+    kv_mount: str = Field("kv", alias="VAULT_KV_MOUNT")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 class AppSettings(BaseSettings):
@@ -65,7 +66,34 @@ class AppSettings(BaseSettings):
     loads their respective env vars.
     """
 
-    model_config = SettingsConfigDict(extra="ignore")
-    log_level: str = Field("INFO", validation_alias=AliasChoices("LOG_LEVEL"))
-    s3: S3Settings = S3Settings()
-    vault: VaultSettings = VaultSettings()
+    s3: S3Settings = Field(default_factory=S3Settings)
+    vault: VaultSettings = Field(default_factory=VaultSettings)
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    def configure_logging(self) -> None:
+        logging.basicConfig(
+            level=getattr(logging, self.log_level.upper(), logging.INFO),
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        )
+
+    def assert_runtime_ready(self) -> None:
+        missing = []
+        for name in (
+            "endpoint_url",
+            "region_name",
+            "access_key",
+            "secret_key",
+            "bucket_raw",
+        ):
+            if not getattr(self.s3, name, None):
+                missing.append(f"s3.{name}")
+            if not self.vault.addr or not self.vault.token:
+                missing.append("vault.addr/token")
+        if missing:
+            from src.ingestion.exception import ConfigError
+
+            raise ConfigError(
+                f"Missing required settings: {', '.join(missing)}"
+            )
