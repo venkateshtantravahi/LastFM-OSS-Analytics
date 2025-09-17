@@ -46,10 +46,12 @@ Open http://localhost:8200 (token: dev-root)
 Enable KV v2 at path "kv" → create secret kv/lastfm with key api_key=<YOUR_KEY>
 ```
 # Live Connections
+
 MinIO Console: [http://localhost:9001](http://localhost:9001) \
 Vault UI: [http://localhost:8200](http://localhost:8200) \
 pgAdmin: [http://localhost:5050](http://localhost:5050) \
 airflow-api-server UI: [http://localhost:8080](https://localhost:8080)
+
 ---
 
 ## Running a smoke test (manual)
