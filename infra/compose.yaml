@@ -38,6 +38,7 @@ x-airflow-common: &airflow-common
   volumes:
     - ../dags:/opt/airflow/dags
     - ../src:/opt/airflow/src
+    - ../scripts:/opt/airflow/scripts
     - airflow_logs:/opt/airflow/logs
 
 services:
@@ -142,6 +143,7 @@ services:
         condition: service_healthy
     environment:
       <<: *airflow-common-env
+
 #      AIRFLOW__SDK__API_URL: http://airflow-api-server:8080
 #      AIRFLOW__SDK__API_AUTH_BACKEND: airflow.sdk.api.auth.backend.default
 

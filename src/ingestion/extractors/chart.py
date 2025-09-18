@@ -14,9 +14,9 @@ LOG = logging.getLogger(__name__)
 @dataclass(init=False)
 class ChartTopArtists(BaseExtractor):
     endpoint_name: ClassVar[str] = "chart.getTopArtists"
-    limit: int = 200
+    limit: int
 
-    def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
+    def __init__(self, ctx: ExtractContext, *, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
         LOG.debug(
@@ -33,9 +33,9 @@ class ChartTopArtists(BaseExtractor):
 @dataclass(init=False)
 class ChartTopTracks(BaseExtractor):
     endpoint_name: ClassVar[str] = "chart.getTopTracks"
-    limit: int = 200
+    limit: int
 
-    def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
+    def __init__(self, ctx: ExtractContext, *, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
         LOG.debug(
@@ -52,9 +52,9 @@ class ChartTopTracks(BaseExtractor):
 @dataclass(init=False)
 class ChartTopTags(BaseExtractor):
     endpoint_name: ClassVar[str] = "chart.getTopTags"
-    limit: int = 200
+    limit: int
 
-    def __init__(self, ctx: ExtractContext, limit: int = 200) -> None:
+    def __init__(self, ctx: ExtractContext, *, limit: int = 200) -> None:
         super().__init__(ctx)
         self.limit = limit
         LOG.debug(

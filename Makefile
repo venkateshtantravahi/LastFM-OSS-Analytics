@@ -12,6 +12,11 @@ DC               := cd $(INFRA_DIR) && docker compose -f compose.yaml --env-file
 # Profiles
 PROFILE_ENV      := COMPOSE_PROFILES=airflow
 
+# Airflow Commons
+AIRFLOW_API ?= airflow-api-server
+AIRFLOW_SCHED ?= airflow-scheduler
+AIRFLOW_DAGPROC ?= airflow-dag-processor
+
 # Service groups
 CORE_SERVICES    := postgres minio minio-mc vault pgadmin
 AIRFLOW_SERVICES := airflow-api-server airflow-scheduler airflow-dag-processor
@@ -65,27 +70,12 @@ airflow-up: ## Start Airflow API server + scheduler + DAG processor.
 airflow-stop: ## Stop only Airflow containers (keep core running).
 	@$(DC) stop $(AIRFLOW_SERVICES)
 
+airflow-down-clean: ## Stop Airflow and remove their volumes/logs (DEV DATA LOSS for Airflow only)
+	@$(DC) down -v --remove-orphans $(AIRFLOW_SERVICES)
+
 airflow-restart: ## Restart Airflow services.
 	@$(MAKE) airflow-stop >/dev/null || true
 	@$(MAKE) airflow-up
-
-airflow-dags: ## List DAGs from inside API server.
-	@$(DC) exec airflow-api-server airflow dags list
-
-airflow-errors: ## Show DAG import errors.
-	@$(DC) exec airflow-api-server airflow dags list-import-errors
-
-airflow-dagdir: ## Show DAGs folder inside container.
-	@$(DC) exec airflow-api-server bash -lc 'echo "DAGS_FOLDER=${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}"; ls -la ${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}'
-
-airflow-unpause: ## Unpause the ingest_chart_daily DAG.
-	@$(DC) exec airflow-api-server airflow dags unpause ingest_chart_daily
-
-airflow-trigger: ## Trigger the ingest_chart_daily DAG once.
-	@$(DC) exec airflow-api-server airflow dags trigger ingest_chart_daily
-
-airflow-logs-dp: ## Tail DAG processor logs.
-	@$(DC) logs -f --tail=200 airflow-dag-processor
 
 get-airflow-password: ## Print generated Airflow login (simple_auth manager).
 	@cd $(INFRA_DIR) && docker compose --env-file .env exec airflow-api-server \
@@ -106,6 +96,97 @@ ak=os.environ.get(\"MINIO_ROOT_USER\"); sk=os.environ.get(\"MINIO_ROOT_PASSWORD\
 s3=boto3.client(\"s3\", endpoint_url=endpoint, aws_access_key_id=ak, aws_secret_access_key=sk, region_name=\"us-east-1\"); \
 print(\"buckets:\", [b[\"Name\"] for b in s3.list_buckets().get(\"Buckets\", [])])" \
 	'
+
+# ---- DB/metadata quick helpers (safe-ish) ----
+airflow-refresh-dagbag: ## Force refresh of serialized DAGs (clears table).
+	@$(DC) exec $(AIRFLOW_API) bash -lc "airflow dags reserialize"
+
+airflow-db-check: ## Quick DB check (prints number of tables).
+	@$(DC) exec $(AIRFLOW_API) bash -lc "airflow db check"
+
+# --------------- Airflow DAGs lookups and testing locally ---------------------
+# List / errors / where are my DAGs?
+
+airflow-dags: ## List DAGs from inside API server.
+	@$(DC) exec $(AIRFLOW_API) airflow dags list
+
+airflow-errors: ## Show DAG import errors.
+	@$(DC) exec $(AIRFLOW_API) airflow dags list-import-errors
+
+airflow-dagdir: ## Show DAGs folder inside container.
+	@$(DC) exec $(AIRFLOW_API) bash -lc 'echo "DAGS_FOLDER=${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}"; ls -la ${AIRFLOW__CORE__DAGS_FOLDER:-/opt/airflow/dags}'
+
+#--------Unpause / Trigger (single - DAG )----------
+# Usage:
+# make airflow-unpause DAG=ingest_chart_daily
+# make airflow-trigger DAG=ingest_chart_daily
+airflow-unpause: ## Unpause one DAG (DAG=<dag_id>)
+	@test -n "$(DAG)" || (echo "DAG is required: make $@ DAG=<dag_id>"; exit 2)
+	@$(DC) exec $(AIRFLOW_API) airflowdags unpause "$(DAG)"
+
+airflow-trigger: ## Trigger one DAG once (DAG=<dag_id>)
+	@test -n "$(DAG)" || (echo "DAG is required: make $@ DAG=<dag_id>"; exit 2)
+	@$(DC) exec $(AIRFLOW_API) airflow dags trigger "$(DAG)"
+
+# ---- Unpause / Trigger (many or all) ----
+# Usage (many): make airflow-unpause-many DAGS="ingest_chart_daily ingest_geo_daily"
+#               make airflow-trigger-many DAGS="ingest_chart_daily ingest_geo_daily"
+airflow-unpause-many: ## Unpause many DAGs (DAGS="a b c")
+	@test -n "$(DAGS)" || (echo "DAGS is required: make $@ DAGS=\"dag1 dag2 ...\""; exit 2)
+	@$(DC) exec $(AIRFLOW_API) bash -lc 'for d in $(DAGS); do echo "unpause: $$d"; airflow dags unpause "$$d"; done'
+
+airflow-trigger-many: ## Trigger many DAGs (DAGS="a b c")
+	@test -n "$(DAGS)" || (echo "DAGS is required: make $@ DAGS=\"dag1 dag2 ...\""; exit 2)
+	@$(DC) exec $(AIRFLOW_API) bash -lc 'for d in $(DAGS); do echo "trigger: $$d"; airflow dags trigger "$$d"; done'
+
+airflow-unpause-all: ## Unpause all DAGs
+	@$(DC) exec $(AIRFLOW_API) airflow dags unpause --treat-dag-id-as-regex '.*'
+
+airflow-trigger-all: ## Trigger all DAGs
+	@(DC) exec $(AIRFLOW_API) airflow dags trigger --treat-dag-id-as-regex '.*'
+
+# ---- Health check: Scheduler -> API (v2 monitor endpoint) ----
+airflow-api-health-check: ## check if scheduler is able to connect the api-server via health check
+	@$(DC) exec -T $(AIRFLOW_SCHED) sh -lc '\
+	echo "API URL: $$AIRFLOW__API__BASE_URL"; \
+	curl -fsS "$$AIRFLOW__API__BASE_URL/api/v2/monitor/health" >/dev/null \
+	&& echo "api: ok" || (echo "api: not ok" && exit 1)'
+
+# ---- Logs while debugging ----
+airflow-logs-api: ## Tail API server logs.
+	@$(DC) logs -f --tail=200 $(AIRFLOW_API)
+
+airflow-logs-scheduler: ## Tail Scheduler logs.
+	@$(DC) logs -f --tail=200 $(AIRFLOW_SCHED)
+
+airflow-logs-dp: ## Tail DAG Processor logs.
+	@$(DC) logs -f --tail=200 $(AIRFLOW_DAGPROC)
+
+# ---- Sanity check: ingested data in S3/MinIO ----
+# Requires S3_ENDPOINT and S3_BUCKET_RAW available in the scheduler env.
+airflow-check-ingested-data-head: ## Sanity check if data ingested properly into buckets
+	@$(DC) exec -T $(AIRFLOW_SCHED) python /opt/airflow/scripts/check_s3.py
+
+# ---- Local DAG testing / parsing / backfill ----
+# Examples:
+#   make airflow-parse DAG=ingest_chart_daily
+#   make airflow-test DAG=ingest_chart_daily EXECUTION_DATE=2025-09-18
+#   make airflow-backfill DAG=ingest_chart_daily START=2025-09-10 END=2025-09-12
+airflow-parse: ## Parse a DAG to catch import/parse errors (DAG=<dag_id>)
+	@test -n "$(DAG)" || (echo "DAG is required: make $@ DAG=<dag_id>"; exit 2)
+	@$(DC) exec $(AIRFLOW_API) airflow dags parse "$(DAG)"
+
+airflow-test: ## One-off test run (DAG=<dag_id> EXECUTION_DATE=<iso>)
+	@test -n "$(DAG)" || (echo "DAG is required: make $@ DAG=<dag_id>"; exit 2)
+	@test -n "$(EXECUTION_DATE)" || (echo "EXECUTION_DATE is required (e.g., 2025-09-18)"; exit 2)
+	@$(DC) exec $(AIRFLOW_API) airflow dags test "$(DAG)" "$(EXECUTION_DATE)"
+
+airflow-backfill: ## Backfill date range (DAG=<dag_id> START=<iso> END=<iso>)
+	@test -n "$(DAG)" || (echo "DAG is required"; exit 2)
+	@test -n "$(START)" || (echo "START is required (YYYY-MM-DD)"; exit 2)
+	@test -n "$(END)" || (echo "END is required (YYYY-MM-DD)"; exit 2)
+	@$(DC) exec $(AIRFLOW_API) airflow dags backfill -s "$(START)" -e "$(END)" "$(DAG)"
+
 
 # ------------- MinIO buckets (idempotent) -------
 buckets: ## Re-run MinIO bucket bootstrap script.
